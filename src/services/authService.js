@@ -15,6 +15,7 @@ import {
   onSnapshot,
   getDocs,
   query,
+  where,
   limit,
 } from 'firebase/firestore';
 import { auth, db, isFirebaseConfigured } from './firebase';
@@ -22,7 +23,7 @@ import { auth, db, isFirebaseConfigured } from './firebase';
 const SUPER_ADMIN_ENV_EMAIL = (import.meta.env.VITE_SUPER_ADMIN_EMAIL || '').trim().toLowerCase();
 
 /**
- * Checks if a given email is designated as Super Admin
+ * Checks if a given email is designated as Super Admin via env variable
  */
 export function isConfiguredSuperAdmin(email) {
   if (!email) return false;
@@ -32,8 +33,22 @@ export function isConfiguredSuperAdmin(email) {
 }
 
 /**
+ * Super Admin: Claim or promote a user to Super Admin
+ */
+export async function claimSuperAdmin(uid) {
+  if (!db || !uid) return;
+  const userDocRef = doc(db, 'users', uid);
+  await updateDoc(userDocRef, {
+    role: 'superadmin',
+    status: 'approved',
+    approvedAt: new Date().toISOString(),
+    approvedBy: 'system-claim',
+  });
+}
+
+/**
  * Register a new user with Email, Password and Full Name.
- * The first ever registered user is automatically granted Super Admin with lifetime approval.
+ * If no superadmin exists in the database, this user becomes Super Admin with lifetime approval.
  * Subsequent users are set to 'pending' until the Super Admin approves them.
  */
 export async function registerUser({ email, password, displayName }) {
@@ -43,6 +58,28 @@ export async function registerUser({ email, password, displayName }) {
 
   const cleanEmail = email.trim().toLowerCase();
   const cleanName = (displayName || '').trim() || cleanEmail.split('@')[0];
+
+  // Check if any Super Admin already exists in Firestore BEFORE creating new user
+  let isSuperAdmin = isConfiguredSuperAdmin(cleanEmail);
+
+  if (!isSuperAdmin) {
+    try {
+      const q = query(
+        collection(db, 'users'),
+        where('role', '==', 'superadmin'),
+        limit(1)
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        // No superadmin exists anywhere in the database yet -> this user is Super Admin
+        isSuperAdmin = true;
+      }
+    } catch (e) {
+      console.warn('Could not check existing superadmin count:', e);
+      // Fallback: if checking fails, first user registration gets superadmin
+      isSuperAdmin = true;
+    }
+  }
 
   // 1. Create Firebase Auth user
   const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
@@ -55,27 +92,10 @@ export async function registerUser({ email, password, displayName }) {
     console.warn('Could not update profile name in Auth:', e);
   }
 
-  // 3. Determine if this user should be Super Admin
-  // If email matches configured super admin email OR if this is the first user in 'users' collection
-  let isSuperAdmin = isConfiguredSuperAdmin(cleanEmail);
-
-  if (!isSuperAdmin) {
-    try {
-      const q = query(collection(db, 'users'), limit(1));
-      const snap = await getDocs(q);
-      if (snap.empty) {
-        // First user ever gets Super Admin access automatically
-        isSuperAdmin = true;
-      }
-    } catch (e) {
-      console.warn('Could not check existing users count:', e);
-    }
-  }
-
   const status = isSuperAdmin ? 'approved' : 'pending';
   const role = isSuperAdmin ? 'superadmin' : 'user';
 
-  // 4. Save user document in Firestore 'users/{uid}'
+  // 3. Save user document in Firestore 'users/{uid}'
   const userDocRef = doc(db, 'users', user.uid);
   const userProfile = {
     uid: user.uid,
@@ -166,16 +186,32 @@ export function subscribeToAuth(onAuthChange) {
         if (docSnap.exists()) {
           profile = docSnap.data();
         } else {
-          // If profile doc doesn't exist yet, create it
-          const isSuperAdmin = isConfiguredSuperAdmin(user.email);
+          // If profile doc doesn't exist yet, check if any superadmin exists
+          let isSuper = isConfiguredSuperAdmin(user.email);
+          if (!isSuper) {
+            try {
+              const adminQ = query(
+                collection(db, 'users'),
+                where('role', '==', 'superadmin'),
+                limit(1)
+              );
+              const adminSnap = await getDocs(adminQ);
+              if (adminSnap.empty) {
+                isSuper = true;
+              }
+            } catch (e) {
+              console.warn('Superadmin check failed:', e);
+            }
+          }
+
           profile = {
             uid: user.uid,
             email: user.email.toLowerCase(),
             displayName: user.displayName || user.email.split('@')[0],
-            status: isSuperAdmin ? 'approved' : 'pending',
-            role: isSuperAdmin ? 'superadmin' : 'user',
+            status: isSuper ? 'approved' : 'pending',
+            role: isSuper ? 'superadmin' : 'user',
             createdAt: new Date().toISOString(),
-            approvedAt: isSuperAdmin ? new Date().toISOString() : null,
+            approvedAt: isSuper ? new Date().toISOString() : null,
           };
           try {
             await setDoc(userDocRef, profile);
@@ -184,8 +220,35 @@ export function subscribeToAuth(onAuthChange) {
           }
         }
 
-        const isSuperAdmin =
+        let isSuperAdmin =
           profile.role === 'superadmin' || isConfiguredSuperAdmin(user.email);
+
+        // Self-healing check: If the user is marked pending or user, but NO superadmin exists in Firestore,
+        // automatically promote this user to Super Admin and approve them!
+        if (!isSuperAdmin) {
+          try {
+            const adminQ = query(
+              collection(db, 'users'),
+              where('role', '==', 'superadmin'),
+              limit(1)
+            );
+            const adminSnap = await getDocs(adminQ);
+            if (adminSnap.empty) {
+              isSuperAdmin = true;
+              profile.role = 'superadmin';
+              profile.status = 'approved';
+              await updateDoc(userDocRef, {
+                role: 'superadmin',
+                status: 'approved',
+                approvedAt: new Date().toISOString(),
+                approvedBy: 'system-first-user',
+              });
+            }
+          } catch (e) {
+            console.warn('Could not perform self-healing superadmin check:', e);
+          }
+        }
+
         const status = isSuperAdmin ? 'approved' : profile.status || 'pending';
 
         onAuthChange({
@@ -203,7 +266,6 @@ export function subscribeToAuth(onAuthChange) {
       },
       (error) => {
         console.warn('Error listening to user profile doc:', error);
-        // Fallback for permission errors
         const isSuperAdmin = isConfiguredSuperAdmin(user.email);
         onAuthChange({
           user,

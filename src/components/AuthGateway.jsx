@@ -14,7 +14,7 @@ import {
   Loader2,
   Sparkles,
 } from 'lucide-react';
-import { registerUser, loginUser, logoutUser } from '../services/authService';
+import { registerUser, loginUser, logoutUser, claimSuperAdmin } from '../services/authService';
 
 export default function AuthGateway({ authState, children }) {
   const { user, profile, isApproved, isSuperAdmin, isPending, isRevoked, loading } =
@@ -30,6 +30,20 @@ export default function AuthGateway({ authState, children }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successNotice, setSuccessNotice] = useState('');
+  const [isClaiming, setIsClaiming] = useState(false);
+
+  const handleClaimSuperAdmin = async () => {
+    if (!user) return;
+    setIsClaiming(true);
+    try {
+      await claimSuperAdmin(user.uid);
+    } catch (err) {
+      console.error('Failed to claim super admin:', err);
+      alert('Error activating Super Admin: ' + err.message);
+    } finally {
+      setIsClaiming(false);
+    }
+  };
 
   // 1. Loading state
   if (loading) {
@@ -65,7 +79,7 @@ export default function AuthGateway({ authState, children }) {
           <div className="pending-info-box">
             <p className="pending-desc">
               Your account has been registered successfully! To maintain timetable integrity and
-              security, access must be approved by the <strong>Super Admin</strong>.
+              security, regular academic accounts must be approved by the <strong>Super Admin</strong>.
             </p>
             <div className="pending-perk-row">
               <ShieldCheck size={18} className="text-success" />
@@ -78,6 +92,30 @@ export default function AuthGateway({ authState, children }) {
           </div>
 
           <div className="pending-actions">
+            <button
+              type="button"
+              className="btn btn-primary w-full"
+              style={{
+                background: 'linear-gradient(135deg, #1e40af 0%, #3b82f6 100%)',
+                padding: '11px 16px',
+                fontWeight: 700,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                marginBottom: '8px',
+              }}
+              disabled={isClaiming}
+              onClick={handleClaimSuperAdmin}
+            >
+              <ShieldCheck size={18} />
+              <span>{isClaiming ? 'Activating Super Admin...' : 'I am the Owner (Activate Super Admin)'}</span>
+            </button>
+
             <button
               type="button"
               className="btn btn-secondary w-full"
