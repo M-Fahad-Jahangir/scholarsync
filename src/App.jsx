@@ -10,11 +10,19 @@ import AddClassModal from './components/AddClassModal';
 import AddTabModal from './components/AddTabModal';
 import AddLectureModal from './components/AddLectureModal';
 import AddSubjectModal from './components/AddSubjectModal';
+import AuthGateway from './components/AuthGateway';
+import UserManagementModal from './components/UserManagementModal';
 import {
   isFirebaseConfigured,
   subscribeToTimetable,
   syncTimetableToCloud,
 } from './services/firebase';
+import {
+  subscribeToAuth,
+  logoutUser,
+  subscribeToAllUsers,
+} from './services/authService';
+import { Users, LogOut, Shield, Clock } from 'lucide-react';
 
 import {
   INITIAL_PROGRAMS,
@@ -168,6 +176,41 @@ export default function App() {
   const [isAddSubjectOpen, setIsAddSubjectOpen] = useState(false);
   const [addSubjectActiveCategory, setAddSubjectActiveCategory] = useState(null);
   const [cellTargetSlot, setCellTargetSlot] = useState(null); // for quick-add in cell
+
+  // Authentication & Access Control state
+  const [authState, setAuthState] = useState({
+    user: null,
+    profile: null,
+    isApproved: false,
+    isSuperAdmin: false,
+    isPending: false,
+    isRevoked: false,
+    loading: true,
+    isLocalMode: false,
+  });
+  const [isUserMgmtOpen, setIsUserMgmtOpen] = useState(false);
+  const [pendingUsersCount, setPendingUsersCount] = useState(0);
+
+  // Subscribe to real-time Auth & Role status
+  useEffect(() => {
+    const unsubscribe = subscribeToAuth((newAuth) => {
+      setAuthState(newAuth);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // If Super Admin, subscribe to user list to get real-time pending approval notifications
+  useEffect(() => {
+    if (!authState.isSuperAdmin) {
+      setPendingUsersCount(0);
+      return;
+    }
+    const unsubscribe = subscribeToAllUsers((users) => {
+      const pending = users.filter((u) => u.status === 'pending');
+      setPendingUsersCount(pending.length);
+    });
+    return () => unsubscribe();
+  }, [authState.isSuperAdmin]);
 
   // Save to localStorage whenever state changes
   useEffect(() => {
@@ -970,26 +1013,80 @@ export default function App() {
   };
 
   return (
-    <div className="app-layout" id="app-root-container">
-      <main className="main-content-area">
-        {/* Cloud Sync Status Indicator */}
-        <div className={`cloud-sync-pill-bar ${isFirebaseConfigured ? 'is-cloud-active' : 'is-local-mode'}`}>
-          <div className="cloud-sync-info">
-            <span className={`sync-status-indicator-dot ${isFirebaseConfigured ? 'dot-live' : 'dot-local'}`} />
-            <span className="sync-status-label">
-              {isFirebaseConfigured ? (
-                <>
-                  <strong>Firebase Cloud Sync:</strong> Live & Connected
-                  {isCloudSyncing && <span className="sync-activity-tag">Syncing changes...</span>}
-                </>
-              ) : (
-                <>
-                  <strong>Local Storage Mode:</strong> Timetable active offline • Connect Firebase in <code>.env</code> for live multi-device syncing
-                </>
-              )}
-            </span>
+    <AuthGateway authState={authState}>
+      <div className="app-layout" id="app-root-container">
+        <main className="main-content-area">
+          {/* Cloud Sync & User Profile Header Bar */}
+          <div className="top-system-nav-bar">
+            {/* Left: Cloud Sync Status Indicator */}
+            <div className={`cloud-sync-pill-bar ${isFirebaseConfigured ? 'is-cloud-active' : 'is-local-mode'}`}>
+              <div className="cloud-sync-info">
+                <span className={`sync-status-indicator-dot ${isFirebaseConfigured ? 'dot-live' : 'dot-local'}`} />
+                <span className="sync-status-label">
+                  {isFirebaseConfigured ? (
+                    <>
+                      <strong>Firebase Cloud Sync:</strong> Live & Connected
+                      {isCloudSyncing && <span className="sync-activity-tag">Syncing changes...</span>}
+                    </>
+                  ) : (
+                    <>
+                      <strong>Local Storage Mode:</strong> Timetable active offline • Connect Firebase in <code>.env</code> for live multi-device syncing
+                    </>
+                  )}
+                </span>
+              </div>
+            </div>
+
+            {/* Right: Auth User Profile & Super Admin Controls */}
+            {authState.user && (
+              <div className="top-auth-user-cluster">
+                {authState.isSuperAdmin && (
+                  <button
+                    type="button"
+                    className="btn-superadmin-mgmt"
+                    onClick={() => setIsUserMgmtOpen(true)}
+                    title="User Management & Sign-Up Approvals"
+                  >
+                    <Users size={15} />
+                    <span>User Management</span>
+                    {pendingUsersCount > 0 && (
+                      <span className="pending-badge-bubble animate-pulse" title={`${pendingUsersCount} pending approval(s)`}>
+                        {pendingUsersCount} pending
+                      </span>
+                    )}
+                  </button>
+                )}
+
+                <div className="user-profile-badge">
+                  <div className={`user-badge-avatar ${authState.isSuperAdmin ? 'avatar-super' : ''}`}>
+                    {(authState.profile?.displayName || authState.user?.email || 'U')[0].toUpperCase()}
+                  </div>
+                  <div className="user-badge-info">
+                    <span className="user-badge-name">
+                      {authState.profile?.displayName || authState.user?.email}
+                    </span>
+                    {authState.isSuperAdmin ? (
+                      <span className="user-badge-role role-superadmin">
+                        <Shield size={10} /> Super Admin
+                      </span>
+                    ) : (
+                      <span className="user-badge-role role-user">Approved User</span>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn-header-signout"
+                  onClick={() => logoutUser()}
+                  title="Sign out of ScholarSync"
+                >
+                  <LogOut size={14} />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            )}
           </div>
-        </div>
 
         {/* Active Filter Bar */}
         {(selectedSubjectFilter || highlightedLectureIds) && (
@@ -1171,6 +1268,13 @@ export default function App() {
         activeDepartment={addSubjectActiveCategory}
         onAddSubject={handleAddTrackedSubject}
       />
+
+      <UserManagementModal
+        isOpen={isUserMgmtOpen}
+        onClose={() => setIsUserMgmtOpen(false)}
+        currentUserEmail={authState.user?.email}
+      />
     </div>
-  );
+  </AuthGateway>
+);
 }

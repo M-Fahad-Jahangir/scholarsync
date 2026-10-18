@@ -6,6 +6,7 @@ import {
   onSnapshot,
   enableIndexedDbPersistence,
 } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 
 const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : {};
 
@@ -27,15 +28,17 @@ export const isFirebaseConfigured = Boolean(
 
 let app = null;
 let db = null;
+let auth = null;
 
 if (isFirebaseConfigured) {
   try {
     app = initializeApp(firebaseConfig);
     db = getFirestore(app);
+    auth = getAuth(app);
     if (typeof window !== 'undefined') {
       try {
         enableIndexedDbPersistence(db).catch(() => {
-          // Persistence may already be active or multi-tab restricted; silently proceed
+          // Multi-tab restricted or already initialized; proceed silently
         });
       } catch {}
     }
@@ -94,4 +97,4 @@ export async function syncTimetableToCloud(payload) {
   }
 }
 
-export { app, db, firebaseConfig };
+export { app, db, auth, firebaseConfig };
